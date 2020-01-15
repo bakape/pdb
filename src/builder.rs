@@ -50,31 +50,28 @@ pub fn select(
 
 macro_rules! build_value_enum {
     ($($variant:tt)+) => {
-        as_item! {
-			// Supported value types usable in the query builder
+		// Supported value types usable in the query builder
+		#[derive(Serialize, Deserialize, Clone)]
+		#[allow(non_camel_case_types)]
+		pub enum Value {
+			// Lack of value
+			Null,
 
-			#[derive(Serialize, Deserialize, Clone)]
-			#[allow(non_camel_case_types)]
-            pub enum Value {
-				// Lack of value
-				Null,
+			// Value inside the current row's column by name or alias
+			Column(String),
 
-				// Value inside the current row's column by name or alias
-				Column(String),
+			// Result of SQL expression. Note that for Comparators other
+			// than In, only the first result of the expression will be
+			// used, if any.
+			Expression(SelectBuilder),
 
-				// Result of SQL expression. Note that for Comparators other
-				// than In, only the first result of the expression will be
-				// used, if any.
-				Expression(SelectBuilder),
-
-				$(
-					// Constant value
-					$variant($variant),
-				)+
-
+			$(
 				// Constant value
-				Vec_u8(Vec<u8>),
-			}
+				$variant($variant),
+			)+
+
+			// Constant value
+			Vec_u8(Vec<u8>),
 		}
 
 		$(
@@ -85,12 +82,6 @@ macro_rules! build_value_enum {
 			}
 		)+
     };
-}
-
-macro_rules! as_item {
-	($i:item) => {
-			$i
-	};
 }
 
 build_value_enum! {
