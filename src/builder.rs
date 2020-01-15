@@ -242,9 +242,10 @@ mod tests {
 
 	// Simply assert this compiles
 	#[test]
+	#[allow(unused)]
 	fn filter_construction() -> Result<(), String> {
-		Filter::new("user", Comparator::Eq, 20_u64);
-		Filter::new("user", Comparator::Eq, select("id", &["article"])?);
+		!(Filter::new("user", Comparator::Eq, 20_u64)
+			+ Filter::new("user", Comparator::Eq, select("id", &["article"])?));
 		Ok(())
 	}
 }
