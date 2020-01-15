@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::hash::Hash;
 
 // Select statement builder
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SelectBuilder {
 	// Source table or statement
 	// TODO: enum
@@ -13,7 +12,7 @@ pub struct SelectBuilder {
 	columns: Vec<Column>,
 }
 
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Column {
 	name: String,
 	alias: Option<String>,
@@ -49,21 +48,81 @@ pub fn select(
 	})
 }
 
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
-pub enum Value {
-	// Value inside the current rows column by name or alias
-	Column(String),
+macro_rules! build_value_enum {
+    ($($variant:tt)+) => {
+        as_item! {
+			// Supported value types usable in the query builder
 
-	// String format constant value comparable to the other other side of the
-	// expression
-	Constant(String),
+			#[derive(Serialize, Deserialize, Clone)]
+			#[allow(non_camel_case_types)]
+            pub enum Value {
+				// Lack of value
+				Null,
 
-	// Result of SQL expression. Note that for Comparators other than In, only
-	// the first result of the expression will be used.
-	Expression(SelectBuilder),
+				// Value inside the current row's column by name or alias
+				Column(String),
+
+				// Result of SQL expression. Note that for Comparators other
+				// than In, only the first result of the expression will be
+				// used, if any.
+				Expression(SelectBuilder),
+
+				$(
+					// Constant value
+					$variant($variant),
+				)+
+
+				// Constant value
+				Vec_u8(Vec<u8>),
+			}
+		}
+
+		$(
+			impl From<$variant> for Value {
+				fn from(v: $variant) -> Self {
+					Self::$variant(v)
+				}
+			}
+		)+
+    };
 }
 
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
+macro_rules! as_item {
+	($i:item) => {
+			$i
+	};
+}
+
+build_value_enum! {
+	i8 i16 i32 i64 i128 isize
+	u8 u16 u32 u64 u128
+	f32 f64
+	char
+	bool
+	String
+
+	// TODO: More types (see Postgres for inspiration)
+}
+
+impl From<&str> for Value {
+	fn from(v: &str) -> Self {
+		Self::Column(v.into())
+	}
+}
+
+impl From<SelectBuilder> for Value {
+	fn from(v: SelectBuilder) -> Self {
+		Self::Expression(v)
+	}
+}
+
+impl From<Vec<u8>> for Value {
+	fn from(v: Vec<u8>) -> Self {
+		Self::Vec_u8(v)
+	}
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub enum Comparator {
 	// Equal
 	Eq,
@@ -84,7 +143,7 @@ pub enum Comparator {
 	In,
 }
 
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 enum FilterInner {
 	Simple {
 		// Left hand side value
@@ -109,7 +168,7 @@ enum FilterInner {
 }
 
 // Can be modified and combined using ! (not), + (and), | (or) operators
-#[derive(Serialize, Deserialize, Hash, Eq, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Filter {
 	// SQL `not` equivalent
 	inverted: bool,
@@ -118,13 +177,17 @@ pub struct Filter {
 }
 
 impl Filter {
-	pub fn new(lhs: Value, comp: Comparator, rhs: Value) -> Self {
+	pub fn new(
+		lhs: impl Into<Value>,
+		comp: Comparator,
+		rhs: impl Into<Value>,
+	) -> Self {
 		Self {
 			inverted: false,
 			inner: FilterInner::Simple {
-				lhs: lhs,
+				lhs: lhs.into(),
 				comp: comp,
-				rhs: rhs,
+				rhs: rhs.into(),
 			},
 		}
 	}
@@ -170,5 +233,18 @@ impl SelectBuilder {
 	// Apply filter to current row set
 	fn filter(self, f: Filter) -> SelectBuilder {
 		todo!()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// Simply assert this compiles
+	#[test]
+	fn filter_construction() -> Result<(), String> {
+		Filter::new("user", Comparator::Eq, 20_u64);
+		Filter::new("user", Comparator::Eq, select("id", &["article"])?);
+		Ok(())
 	}
 }
