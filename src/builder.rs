@@ -1,7 +1,7 @@
-use chrono::{Date, DateTime, Duration};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
+use std::time::Duration;
 use uuid::Uuid;
 
 // Select statement builder
@@ -74,14 +74,18 @@ macro_rules! build_value_enum {
 				$variant($variant),
 			)+
 
-			// Constant value
-			f32(F32),
+			// Constant encoded f32 value. Wrapped to make sortable.
+			f32([u8; 4]),
 
-			// Constant value
-			f64(F64),
+			// Constant encoded f64 value. Wrapped to make sortable.
+			f64([u8; 8]),
 
-			// Constant value
+			// Constant UUID value as byte array
 			UUID([u8; 16]),
+
+			// Constant duration value in nanoseconds.
+			// Can be used as timestamp as an offset relative to start of epoch.
+			Time(i128),
 
 			// Constant vector of constant values
 			Vec(Vec<Value>),
@@ -132,71 +136,16 @@ build_value_enum! {
 	String
 
 	IpAddr
-
-	// Duration
-	// Date
-	// DateTime
 }
-
-macro_rules! impl_wrapper_tuple {
-	($tuple:tt, $inner:tt) => {
-		define_tuple! {$tuple, $inner}
-
-		impl From<$inner> for $tuple {
-			fn from(v: $inner) -> Self {
-				Self(v)
-			}
-		}
-
-		impl Into<$inner> for $tuple {
-			fn into(self) -> $inner {
-				self.0
-			}
-		}
-
-		impl std::cmp::PartialEq for $tuple {
-			fn eq(&self, other: &$tuple) -> bool {
-				self.0.to_le_bytes() == other.0.to_le_bytes()
-			}
-		}
-
-		impl std::cmp::Eq for $tuple {}
-
-		impl std::cmp::PartialOrd for $tuple {
-			fn partial_cmp(
-				&self,
-				other: &$tuple,
-			) -> Option<std::cmp::Ordering> {
-				self.0.to_le_bytes().partial_cmp(&other.0.to_le_bytes())
-			}
-		}
-
-		impl std::cmp::Ord for $tuple {
-			fn cmp(&self, other: &$tuple) -> std::cmp::Ordering {
-				self.0.to_le_bytes().cmp(&other.0.to_le_bytes())
-			}
-		}
-	};
-}
-
-macro_rules! define_tuple {
-	($ident:ident, $inner:tt) => {
-		// Wrapper for hashing using as a hash collection key
-		#[derive(Serialize, Deserialize, Clone)]
-		pub struct $ident($inner);
-	};
-}
-
-impl_wrapper_tuple! {F32, f32}
-impl_wrapper_tuple! {F64, f64}
 
 impl_value_conversion! {&str, Column}
 impl_value_conversion! {SelectBuilder, Expression}
-
-impl From<Uuid> for Value {
-	fn from(v: Uuid) -> Self {
-		Self::UUID(*v.as_bytes())
-	}
+impl_value_conversion! {Uuid, |v: Uuid| Value::UUID(*v.as_bytes())}
+impl_value_conversion! {f32, |v: f32| Value::f32(v.to_le_bytes())}
+impl_value_conversion! {f64, |v: f64| Value::f64(v.to_le_bytes())}
+impl_value_conversion! {
+	Duration,
+	|v: Duration| Value::Time(v.as_nanos() as i128)
 }
 
 macro_rules! impl_value_from_linear {
@@ -220,7 +169,7 @@ macro_rules! impl_value_from_map {
 	($container:ident, $variant:ident) => {
 		impl<K, V> From<$container<K, V>> for Value
 		where
-			K: Into<Value> + Eq + PartialEq,
+			K: Into<Value>,
 			V: Into<Value>,
 		{
 			fn from(v: $container<K, V>) -> Self {
