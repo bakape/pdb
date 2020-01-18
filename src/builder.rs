@@ -7,13 +7,32 @@ use uuid::Uuid;
 // Select statement builder
 #[derive(Serialize, Deserialize, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct SelectBuilder {
-	// Source table or statement
-	// TODO: enum
-	table: String,
+	src: DataSource,
+}
 
-	// Columns to return from table.
-	// Empty vector means all available columns should be returned.
-	columns: Vec<Column>,
+#[derive(Serialize, Deserialize, Clone, Ord, PartialOrd, Eq, PartialEq)]
+enum DataSource {
+	// Source data from another SelectBuilder
+	Select(Box<SelectBuilder>),
+
+	// Source data from table
+	Table {
+		// Source table name
+		table: String,
+
+		// Columns to return from table.
+		// Empty vector means all available columns should be returned.
+		columns: Vec<Column>,
+	},
+
+	// Apply filter to source
+	Filtered {
+		// Filters applied
+		filter: Filter,
+
+		// Source to be filtered
+		src: Box<DataSource>,
+	},
 }
 
 #[derive(Serialize, Deserialize, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -30,24 +49,26 @@ pub fn select(
 	columns: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<SelectBuilder, String> {
 	Ok(SelectBuilder {
-		table: table.into(),
-		columns: {
-			let it = columns.into_iter();
-			let mut res = Vec::with_capacity(match it.size_hint().1 {
-				Some(s) => s,
-				None => 0,
-			});
-			for c in it {
-				let mut s = c.as_ref().split_ascii_whitespace();
-				res.push(Column {
-					name: match s.next() {
-						Some(s) => s.into(),
-						None => return Err("empty column name".into()),
-					},
-					alias: s.next().map(|x| x.into()),
-				})
-			}
-			res
+		src: DataSource::Table {
+			table: table.into(),
+			columns: {
+				let it = columns.into_iter();
+				let mut res = Vec::with_capacity(match it.size_hint().1 {
+					Some(s) => s,
+					None => 0,
+				});
+				for c in it {
+					let mut s = c.as_ref().split_ascii_whitespace();
+					res.push(Column {
+						name: match s.next() {
+							Some(s) => s.into(),
+							None => return Err("empty column name".into()),
+						},
+						alias: s.next().map(|x| x.into()),
+					})
+				}
+				res
+			},
 		},
 	})
 }
@@ -67,7 +88,7 @@ macro_rules! build_value_enum {
 			// Result of SQL expression. Note that for Comparators other
 			// than In, only the first result of the expression will be
 			// used, if any.
-			Expression(SelectBuilder),
+			Expression(Box<SelectBuilder>),
 
 			$(
 				// Constant value
@@ -184,7 +205,7 @@ macro_rules! impl_value_from_map {
 impl_value_from_map! {BTreeMap, Map}
 impl_value_from_map! {HashMap, Map}
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Comparator {
 	// Equal
 	Eq,
@@ -205,7 +226,7 @@ pub enum Comparator {
 	In,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Ord, PartialOrd, Eq, PartialEq)]
 enum FilterInner {
 	Simple {
 		// Left hand side value
@@ -230,7 +251,7 @@ enum FilterInner {
 }
 
 // Can be modified and combined using ! (not), + (and), | (or) operators
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Ord, PartialOrd, Eq, PartialEq)]
 pub struct Filter {
 	// SQL `not` equivalent
 	inverted: bool,
@@ -293,8 +314,13 @@ impl std::ops::Not for Filter {
 
 impl SelectBuilder {
 	// Apply filter to current row set
-	fn filter(self, f: Filter) -> SelectBuilder {
-		todo!()
+	pub fn filter(self, f: Filter) -> Self {
+		Self {
+			src: DataSource::Filtered {
+				filter: f,
+				src: self.src.into(),
+			},
+		}
 	}
 }
 
