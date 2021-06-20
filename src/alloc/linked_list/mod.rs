@@ -109,6 +109,7 @@ trait Advance {
 struct Forward;
 
 impl Advance for Forward {
+    #[inline]
     fn try_advance<'a, T, const N: usize>(c: &mut CursorMut<'a, T, N>) -> bool
     where
         T: Sized + 'static,
@@ -121,6 +122,7 @@ impl Advance for Forward {
 struct Backward;
 
 impl Advance for Backward {
+    #[inline]
     fn try_advance<'a, T, const N: usize>(c: &mut CursorMut<'a, T, N>) -> bool
     where
         T: Sized + 'static,
@@ -166,7 +168,7 @@ where
         if !self.visited_first {
             self.visited_first = true;
         } else {
-            if !self.cursor.next() {
+            if !A::try_advance(&mut self.cursor) {
                 return None;
             }
         }

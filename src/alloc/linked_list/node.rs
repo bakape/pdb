@@ -35,11 +35,8 @@ where
     /// Can use no more than 7 bits as of 2021.
     const LENGTH_BITS: usize = {
         let mut bits = 1;
-        loop {
+        while 1 << bits - 1 < N {
             bits += 1;
-            if 1 << bits >= N {
-                break;
-            }
         }
 
         bits
@@ -74,7 +71,7 @@ where
                 arr
             },
             next: null_mut(),
-            previous: (0 | (1 << Self::LENGTH_SHIFT)) as *mut _,
+            previous: (0usize | (1 << Self::LENGTH_SHIFT)) as *mut _,
         }
         .into_raw()
     }
@@ -252,6 +249,30 @@ where
         }
     }
 
+    /// Push value to the start of the next node.
+    //
+    /// If the next node is is full or not set, a new node is created and
+    /// returned.
+    pub fn prepend_to_next(&mut self, val: T) -> *mut Self {
+        match unsafe { self.next().as_mut() } {
+            None => {
+                let new = Node::new(val);
+                self.set_next(new);
+                new
+            }
+            Some(next) if next.len() == N => {
+                let new = Node::new(val);
+                next.set_previous(new);
+                self.set_next(new);
+                new
+            }
+            Some(next) => {
+                next.insert_non_full(0, val);
+                null_mut()
+            }
+        }
+    }
+
     /// Insert value into the passed position in the node, shifting all
     /// following nodes to the right.
     /// If a new next node is created containing overflown shifted values, it is
@@ -264,33 +285,8 @@ where
         let len = self.len();
 
         if len < N {
-            assert!(i <= len, "value insertion would result in sparse array");
-
-            // Insert as last value
-            let mut next = Self::wrap_value(val);
-            if i == len {
-                self.vals[i] = next;
-                self.set_length(len + 1);
-                return null_mut();
-            }
-
-            // Shift all following values
-            let mut i = i;
-            loop {
-                std::mem::swap(&mut next, &mut self.vals[i]);
-                unsafe {
-                    let loc = (*next.as_mut_ptr()).1;
-                    if loc != null_mut() {
-                        (*loc).position += 1
-                    }
-                }
-                i += 1;
-                if i == len {
-                    self.vals[i] = next;
-                    self.set_length(len + 1);
-                    return null_mut();
-                }
-            }
+            self.insert_non_full(i, val);
+            return null_mut();
         }
 
         // Split the current array
@@ -325,6 +321,43 @@ where
             self.set_next(new);
 
             return new;
+        }
+    }
+
+    /// Insert value into non-full node at position `i`
+    ///
+    /// # Panics
+    ///
+    /// Panics, if insertion would result in a sparse array.
+    fn insert_non_full(&mut self, i: usize, val: T) {
+        let len = self.len();
+        assert!(i <= len, "value insertion would result in sparse array");
+
+        let mut next = Self::wrap_value(val);
+
+        // Insert as last value
+        if i == len {
+            self.vals[i] = next;
+            self.set_length(len + 1);
+            return;
+        }
+
+        // Shift all following values
+        let mut i = i;
+        loop {
+            std::mem::swap(&mut next, &mut self.vals[i]);
+            unsafe {
+                let loc = (*next.as_mut_ptr()).1;
+                if loc != null_mut() {
+                    (*loc).position += 1
+                }
+            }
+            i += 1;
+            if i == len {
+                self.vals[i] = next;
+                self.set_length(len + 1);
+                return;
+            }
         }
     }
 

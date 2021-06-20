@@ -129,29 +129,26 @@ where
     pub fn insert_before(&mut self, val: T) {
         self.list.length += 1;
 
-        if self.node().len() == 0 {
+        let len = self.node().len();
+        if len == 0 {
             self.node().append(val);
             self.position = 0;
-            return;
-        }
-
-        // Append to previous node
-        if self.position == 0 && self.node().len() == N {
+        } else if self.position == 0 && len == N {
+            // Append to previous node
             let new = self.node().append_to_previous(val);
             if self.list.head == self.node {
                 self.list.head = new;
             }
-            return;
-        }
+        } else {
+            // Insert into current node and possibly split it
+            let new = self.node().insert(self.position, val);
+            if new != null_mut() {
+                // Advance back to next value to maintain API consistency
+                self.next();
 
-        // Insert into current node and possibly split it
-        let new = self.node().insert(self.position, val);
-        if new != null_mut() {
-            // Advance back to next value to maintain API consistency
-            self.next();
-
-            if self.list.tail == self.node {
-                self.list.tail = new;
+                if self.list.tail == self.node {
+                    self.list.tail = new;
+                }
             }
         }
     }
@@ -160,15 +157,23 @@ where
     pub fn insert_after(&mut self, val: T) {
         self.list.length += 1;
 
-        if self.node().len() == 0 {
+        let len = self.node().len();
+        if len == 0 {
+            // Append to start of node
             self.node().append(val);
             self.position = 0;
-            return;
-        }
-
-        let new = self.node().insert(self.position + 1, val);
-        if new != null_mut() && self.list.tail == self.node {
-            self.list.tail = new;
+        } else if len == N {
+            // Prepend to next node
+            let new = self.node().prepend_to_next(val);
+            if new != null_mut() && self.node == self.list.tail {
+                self.list.tail = new;
+            }
+        } else {
+            // Inserts into existing node, possibly splitting it
+            let new = self.node().insert(self.position + 1, val);
+            if new != null_mut() && self.list.tail == self.node {
+                self.list.tail = new;
+            }
         }
     }
 
