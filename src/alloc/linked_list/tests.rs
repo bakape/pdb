@@ -2,7 +2,7 @@
 
 use super::LinkedList;
 use crate::alloc::linked_list::node::Node;
-use std::{collections::LinkedList as StdLibList, fmt::Debug, ptr::null_mut};
+use std::{collections::VecDeque, fmt::Debug, ptr::null_mut};
 
 // Generate tests with various node sizes
 macro_rules! gen_tests {
@@ -27,18 +27,16 @@ macro_rules! gen_tests {
 
 gen_tests! {test_linear_inserts}
 fn test_linear_inserts<const N: usize>() {
-    let src = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
-
-    let mut std_ll = StdLibList::new();
+    let mut std = VecDeque::new();
     let mut ll = LinkedList::<usize, N>::new();
     let mut c = ll.cursor_mut();
-    for i in src {
+    for i in 0..256 {
         c.next();
         c.insert_after(i);
         validate(&mut c.list);
 
-        std_ll.push_back(i);
-        compare_lists(&std_ll, &mut c.list);
+        std.push_back(i);
+        compare(&std, &mut c.list);
     }
 }
 
@@ -50,12 +48,42 @@ fn test_collect<const N: usize>() {
             src.iter().cloned().collect()
         };
     }
-    let std: StdLibList<usize> = copy!();
+    let std: VecDeque<usize> = copy!();
     let mut ll: LinkedList<usize, N> = copy!();
     validate(&mut ll);
-    compare_lists(&std, &mut ll);
+    compare(&std, &mut ll);
 }
 
+gen_tests! {test_insert_before}
+fn test_insert_before<const N: usize>() {
+    let mut std = VecDeque::<usize>::new();
+    let mut ll = LinkedList::<usize, N>::new();
+    let mut c = ll.cursor_mut();
+    let mut pos = 0;
+
+    // Keep inserting before the middle node
+    for i in 0..256 {
+        let mid = i / 2;
+
+        // Keep the cursor right after the middle node
+        if i != 0 {
+            while pos != mid + 1 {
+                pos -= 1;
+                c.previous();
+            }
+        }
+
+        c.insert_before(i);
+        pos += 1;
+
+        validate(&mut c.list);
+
+        std.insert(mid, i);
+        compare(&std, &mut c.list);
+    }
+}
+
+// TODO: insert after tests
 // TODO: seeking tests
 // TODO: various removal tests
 // TODO: fuzzing test with no references
@@ -104,10 +132,8 @@ where
 
 /// Assert the list from standard library and allocator list are equal.
 // Also perform basic consistency validation.
-fn compare_lists<T, const N: usize>(
-    std: &StdLibList<T>,
-    ll: &mut LinkedList<T, N>,
-) where
+fn compare<T, const N: usize>(std: &VecDeque<T>, ll: &mut LinkedList<T, N>)
+where
     T: Sized + Clone + Eq + Debug + 'static,
 {
     macro_rules! compare_it {

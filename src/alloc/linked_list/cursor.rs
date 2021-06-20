@@ -142,14 +142,12 @@ where
         } else {
             // Insert into current node and possibly split it
             let new = self.node().insert(self.position, val);
-            if new != null_mut() {
-                // Advance back to next value to maintain API consistency
-                self.next();
-
-                if self.list.tail == self.node {
-                    self.list.tail = new;
-                }
+            if new != null_mut() && self.list.tail == self.node {
+                self.list.tail = new;
             }
+
+            // Advance back to next value to maintain API consistency
+            self.next();
         }
     }
 
