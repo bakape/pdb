@@ -160,7 +160,7 @@ where
             // Append to start of node
             self.node().append(val);
             self.position = 0;
-        } else if len == N {
+        } else if len == N && self.position == N - 1 {
             // Prepend to next node
             let new = self.node().prepend_to_next(val);
             if new != null_mut() && self.node == self.list.tail {

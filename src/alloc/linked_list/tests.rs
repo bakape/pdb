@@ -83,7 +83,32 @@ fn test_insert_before<const N: usize>() {
     }
 }
 
-// TODO: insert after tests
+gen_tests! {test_insert_after}
+fn test_insert_after<const N: usize>() {
+    let mut std = VecDeque::<usize>::new();
+    let mut ll = LinkedList::<usize, N>::new();
+    let mut c = ll.cursor_mut();
+    let mut pos = 0;
+
+    // Keep inserting after the middle node
+    for i in 0..256 {
+        let mid = i / 2;
+
+        // Keep the cursor on the middle node
+        while pos != mid {
+            pos += 1;
+            c.next();
+        }
+
+        c.insert_after(i);
+
+        validate(&mut c.list);
+
+        std.insert(if i == 0 { 0 } else { mid + 1 }, i);
+        compare(&std, &mut c.list);
+    }
+}
+
 // TODO: seeking tests
 // TODO: various removal tests
 // TODO: fuzzing test with no references
