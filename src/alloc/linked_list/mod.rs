@@ -175,6 +175,11 @@ where
 
         self.cursor.value()
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len(), Some(self.len()))
+    }
 }
 
 impl<'a, T, A, const N: usize> ExactSizeIterator for IterMut<'a, T, A, N>
