@@ -130,6 +130,9 @@ where
     }
     assert_eq!(iterations, ll.len());
 
+    let it_len = ll.iter_mut().len();
+    assert_eq!(it_len, ll.len());
+
     assert_ne!(ll.head, null_mut());
     assert_ne!(ll.tail, null_mut());
     if ll.len() == 0 {
