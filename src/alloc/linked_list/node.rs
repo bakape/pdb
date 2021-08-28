@@ -1,85 +1,66 @@
 use super::{cursor::CursorMut, LinkedList};
-use std::{intrinsics::copy_nonoverlapping, mem::MaybeUninit, ptr::null_mut};
+use std::{
+    mem::MaybeUninit,
+    ptr::{copy, copy_nonoverlapping, null_mut},
+};
 
-/// Unrolled linked list node containing up to N values of type T.
-/// N must fit into 7 bits as of 2021.
-//
-// TODO: validate N fits into 7 bits, when we have const generic constraints
+/// [LinkedList] list node containing up to `N` values of type `T`.
 pub(super) struct Node<T, const N: usize>
 where
     T: Sized,
 {
     /// Previous node in the list
-    ///
-    /// Also stores the used length of vals in the highest 3 bits of the
-    /// pointer, that are not and will not be used for addressing for may years.
-    /// This saves us 8 bytes because of struct padding.
-    /// Most of the time you'd traverse the list from the front, so it's better
-    /// to store it in the `previous` pointer, rather than the `next` one, to
-    /// make getting the address of the next node slightly cheaper.
     previous: *mut Node<T, N>,
 
     /// Next node in the list
     next: *mut Node<T, N>,
 
+    /// Count of occupied slots in the [Node]
+    length: usize,
+
+    /// Pointers to stable references for all present values. `values` can be
+    /// sparsely populated. A `null` in a field indicates the slot is empty.
+    ///
+    /// Separate array for more cache-friendly iteration.
+    references: [*mut Location<T, N>; N],
+
+    // TODO: make `values` a sparse array using nil `Location` as an indicator
+    // for presence. Need to ensure all iteration checks these and removal sets
+    // it to null. Store the `Location` pointers separately for better memory
+    // locality
+    //
     /// Array of values and optional references to these values
-    vals: [MaybeUninit<(T, *mut Location<T, N>)>; N],
+    values: [MaybeUninit<T>; N],
 }
 
 impl<T, const N: usize> Node<T, N>
 where
     T: Sized,
 {
-    /// Number of highest bits in previous pointer used for length storage.
-    ///
-    /// Can use no more than 7 bits as of 2021.
-    const LENGTH_BITS: usize = {
-        let mut bits = 1;
-        while 1 << bits - 1 < N {
-            bits += 1;
-        }
-
-        bits
-    };
-
-    /// Bits to shift a length value for
-    const LENGTH_SHIFT: usize = {
-        #[cfg(not(target_pointer_width = "64"))]
-        compile_error!("only 64 bit systems are supported");
-
-        64 - Self::LENGTH_BITS
-    };
-
-    /// Mask for resetting stored length
-    const LENGTH_MASK: usize = {
-        let mut i = 0;
-        let mut mask = 0;
-        while i < Self::LENGTH_BITS {
-            mask |= 1 << 63 - i;
-            i += 1;
-        }
-        !mask
-    };
-
-    /// Create new node pointer from value
-    pub fn new(val: T) -> *mut Self {
-        Self {
-            vals: {
-                let mut arr: [MaybeUninit<(T, *mut Location<T, N>)>; N] =
-                    unsafe { MaybeUninit::uninit().assume_init() };
-                arr[0] = Self::wrap_value(val);
-                arr
-            },
+    /// Creates new node pointer from value and returns a [Ref] to the value
+    pub fn new(val: T) -> (*mut Self, Ref<T, N>) {
+        let s = Self {
+            length: 1,
+            references: [null_mut(); N],
+            values: unsafe { MaybeUninit::uninit().assume_init() },
             next: null_mut(),
-            previous: (0usize | (1 << Self::LENGTH_SHIFT)) as *mut _,
+            previous: null_mut(),
         }
-        .into_raw()
+        .into_raw();
+        let loc = Location::new(s, 0);
+        unsafe {
+            (*s).references[0] = loc;
+            (*s).values[0] = MaybeUninit::new(val);
+        }
+        (s, loc.into())
     }
 
-    /// Create a new empty Node
-    pub fn empty() -> *mut Self {
+    /// Create a new empty [Node]
+    fn empty() -> *mut Self {
         Self {
-            vals: unsafe { MaybeUninit::uninit().assume_init() },
+            length: 0,
+            references: [null_mut(); N],
+            values: unsafe { MaybeUninit::uninit().assume_init() },
             next: null_mut(),
             previous: null_mut(),
         }
@@ -92,38 +73,25 @@ where
         Box::into_raw(Box::new(self))
     }
 
-    /// Wrap value for inserting into the array
-    #[inline]
-    fn wrap_value(val: T) -> MaybeUninit<(T, *mut Location<T, N>)> {
-        MaybeUninit::new((val, null_mut()))
+    /// Return cursor to the last position of the previous [Node], if any
+    pub fn previous(&self) -> Option<NodeCursor<T, N>> {
+        unsafe { self.previous.as_mut() }.map(|n| NodeCursor {
+            node: n.into(),
+            position: (N
+                - 1
+                - n.references
+                    .iter()
+                    .rev()
+                    .position(|l| !l.is_null())
+                    .unwrap()),
+        })
     }
 
-    /// Store the length of the array
-    #[inline]
-    fn set_length(&mut self, length: usize) {
-        self.previous = (((self.previous as usize) & Self::LENGTH_MASK)
-            | (length << Self::LENGTH_SHIFT)) as *mut _;
-    }
-
-    /// Return pointer to the previous node, if any
-    #[inline]
-    pub fn previous(&self) -> *mut Self {
-        // Sign extend first to make the pointer canonical.
-        // Note: Technically this is implementation defined. We may want a more
-        // standard-compliant way to sign-extend the value.
-        (((self.previous as usize) << Self::LENGTH_BITS) >> Self::LENGTH_BITS)
-            as *mut _
-    }
-
-    /// Set the previous node pointer and set the next node pointer of the
-    /// previous node, if any
+    /// Set the previous [Node] pointer and set the next [Node] pointer of the
+    /// previous [Node], if any
     #[inline]
     fn set_previous(&mut self, previous: *mut Self) {
-        debug_assert!(
-            (previous as usize & Self::LENGTH_MASK) == previous as usize
-        );
-
-        self.store_previous(previous);
+        self.previous = previous;
         if previous != null_mut() {
             unsafe {
                 (*previous).next = self as *mut _;
@@ -131,40 +99,27 @@ where
         }
     }
 
-    /// Encodes the previous node pointer, without setting the next pointer on
-    /// the previous node
-    #[inline]
-    fn store_previous(&mut self, previous: *mut Self) {
-        let len = self.len() as usize;
-        self.previous =
-            (previous as usize | (len << Self::LENGTH_SHIFT)) as *mut _;
+    /// Return cursor to the first position of the previous [Node], if any
+    pub fn next(&self) -> Option<NodeCursor<T, N>> {
+        unsafe { self.next.as_mut() }.map(|n| NodeCursor {
+            node: n.into(),
+            position: n.references.iter().position(|l| !l.is_null()).unwrap(),
+        })
     }
 
-    /// Return pointer to the next node, if any
-    #[inline]
-    pub fn next(&self) -> *mut Self {
-        self.next
-    }
-
-    /// Set the next node pointer and set the previous node pointer of the next
-    /// node, if any
+    /// Set the next [Node] pointer and set the previous [Node] pointer of the
+    /// next [Node], if any
     #[inline]
     fn set_next(&mut self, next: *mut Self) {
         self.next = next;
         if next != null_mut() {
             unsafe {
-                (*next).store_previous(self as *mut _);
+                (*next).previous = self as *mut _;
             }
         }
     }
 
-    /// Return the occupied position count in the node
-    #[inline]
-    pub fn len(&self) -> usize {
-        (self.previous as usize) >> Self::LENGTH_SHIFT
-    }
-
-    /// Drop the Node and all the nodes after it in the list
+    /// Drop the [Node] and all the [Node]s after it in the list
     pub fn drop_list(self) {
         let mut next = self.next;
         while next != null_mut() {
@@ -173,201 +128,214 @@ where
         }
     }
 
-    /// Returns a reference to the value-reference pair
+    /// Shift `n` values in the region `[start; start + n)` `shift` positions.
+    /// A negative `shift` shifts to the left and a positive `shift` shifts to
+    /// the right.
     ///
     /// # Panics
     ///
-    /// Panics, if index is out of bounds.
-    #[inline]
-    fn get(&mut self, i: usize) -> &'_ mut (T, *mut Location<T, N>) {
-        let len = self.len();
-        assert!(i < len, "index out of bounds");
-
-        unsafe { &mut (*self.vals[i].as_mut_ptr()) }
-    }
-
-    /// Returns a reference to the value at position `i`.
-    ///
-    /// # Panics
-    ///
-    /// Panics, if index is out of bounds.
-    #[inline]
-    pub fn value<'a>(&mut self, i: usize) -> &'a mut T {
-        unsafe { std::mem::transmute(&mut self.get(i).0) }
-    }
-
-    /// Returns a reference to the node's value at position `i`.
-    /// `node must not be `null`.
-    ///
-    /// # Panics
-    ///
-    /// Panics, if index is out of bounds or `node` is `null`.
-    #[inline]
-    pub fn reference(node: *mut Self, i: usize) -> NodeRef<T, N> {
-        assert!(node != null_mut());
-        let t = unsafe { (*node).get(i) };
-
-        if t.1 == null_mut() {
-            t.1 = Box::into_raw(Location { node, position: i }.into());
+    /// Panics, if either `start + shift` or `start + n + shift` are out of
+    /// bounds.
+    fn shift(&mut self, start: usize, n: usize, shift: isize) {
+        let new_start = (start as isize + shift) as usize;
+        unsafe {
+            copy(
+                self.values[start..].as_mut_ptr(),
+                self.values[new_start..].as_mut_ptr(),
+                n,
+            );
+            copy(
+                self.references[start..].as_mut_ptr(),
+                self.references[new_start..].as_mut_ptr(),
+                n,
+            );
         }
-        NodeRef { location: t.1 }
+        for l in self.references[new_start..new_start + n].iter_mut() {
+            if !l.is_null() {
+                unsafe {
+                    (**l).position = ((**l).position as isize + shift) as usize;
+                }
+            }
+        }
     }
 
-    /// Appends a value to the node.
+    /// Appends a value to the [Node] and and returns a [Ref] to the value.
     ///
     /// # Panics
     ////
     /// Panics, if node capacity is exceeded.
     #[inline]
-    pub fn append(&mut self, val: T) {
-        let l = self.len();
-        self.vals[l] = Self::wrap_value(val);
-        self.set_length(l + 1);
+    pub fn append(&mut self, val: T) -> Ref<T, N> {
+        let loc = Location::new(self, self.end);
+        self.values[self.end as usize] = MaybeUninit::new((val, loc));
+        self.end += 1;
+        loc.into()
     }
 
-    /// Appends a value to the previous node.
+    /// Appends a value to the previous [Node] and returns a [Ref] to the
+    /// value.
     ///
-    /// If the previous node is is full or not set, a new node is created and
-    /// returned.
-    pub fn append_to_previous(&mut self, val: T) -> *mut Self {
+    /// If the previous [Node] is is full or not set, a new [Node] is created
+    /// and  returned.
+    pub fn append_to_previous(&mut self, val: T) -> (*mut Self, Ref<T, N>) {
         match unsafe { self.previous().as_mut() } {
             None => {
-                let new = Node::new(val);
-                self.set_previous(new);
-                new
+                let re = Node::new(val);
+                self.set_previous(re.0);
+                re
             }
-            Some(prev) if prev.len() == N => {
-                let new = Node::new(val);
-                prev.set_next(new);
-                self.set_previous(new);
-                new
+            Some(prev) if prev.len() == N as u8 => {
+                let re = Node::new(val);
+                prev.set_next(re.0);
+                self.set_previous(re.0);
+                re
             }
-            Some(prev) => {
-                prev.append(val);
-                null_mut()
-            }
+            Some(prev) => (null_mut(), prev.append(val)),
         }
     }
 
-    /// Push value to the start of the next node.
+    /// Push value to the start of the next [Node] and returns a [Ref] to
+    /// the value.
     //
-    /// If the next node is is full or not set, a new node is created and
+    /// If the next [Node] is is full or not set, a new [Node] is created and
     /// returned.
-    pub fn prepend_to_next(&mut self, val: T) -> *mut Self {
+    pub fn prepend_to_next(&mut self, val: T) -> (*mut Self, Ref<T, N>) {
         match unsafe { self.next().as_mut() } {
             None => {
-                let new = Node::new(val);
-                self.set_next(new);
-                new
+                let re = Node::new(val);
+                self.set_next(re.0);
+                re
             }
-            Some(next) if next.len() == N => {
-                let new = Node::new(val);
-                next.set_previous(new);
-                self.set_next(new);
-                new
+            Some(next) if next.len() == N as u8 => {
+                let re = Node::new(val);
+                next.set_previous(re.0);
+                self.set_next(re.0);
+                re
             }
-            Some(next) => {
-                next.insert_non_full(0, val);
-                null_mut()
-            }
+            Some(next) => (null_mut(), next.insert_non_full(0, val)),
         }
     }
 
-    /// Insert value into the passed position in the node, shifting all
-    /// following nodes to the right.
-    /// If a new next node is created containing overflown shifted values, it is
-    /// returned.
+    /// Insert value into the passed position in the [Node], shifting all
+    /// following values to the right and returning a [Ref] to the value.
+    /// If a new next [Node] is created containing overflown shifted values, it
+    /// is returned.
     ///
     /// # Panics
     ///
     /// Panics, if insertion would result in a sparse array.
-    pub fn insert(&mut self, i: usize, val: T) -> *mut Self {
-        let len = self.len();
-
-        if len < N {
-            self.insert_non_full(i, val);
-            return null_mut();
+    pub fn insert(&mut self, i: u8, val: T) -> (*mut Self, Ref<T, N>) {
+        if self.len() < N as u8 {
+            return (null_mut(), self.insert_non_full(i, val));
         }
 
-        // Split the current array
-        {
-            let new = Node::empty();
+        // Split the current array by moving all following values to a new node
+        let new_node = Node::empty();
+        let new_node_len = self.end - i;
+        unsafe {
+            copy_nonoverlapping(
+                self.values[i as usize..].as_ptr(),
+                (*new_node).values.as_mut_ptr(),
+                new_node_len as usize,
+            );
+            (*new_node).end = new_node_len;
 
+            for (i, (_, loc)) in (*new_node).iter_mut().enumerate() {
+                (**loc).node = new_node;
+                (**loc).position = i as u8;
+            }
+        }
+
+        let loc = Location::new(self, i);
+        self.values[i as usize] = MaybeUninit::new((val, loc));
+        self.end = i + 1;
+
+        if self.next != null_mut() {
             unsafe {
-                let new_len = len - i;
-                std::ptr::copy_nonoverlapping(
-                    self.vals[i..].as_ptr(),
-                    (*new).vals.as_mut_ptr(),
-                    new_len,
-                );
-                (*new).set_length(new_len);
+                (*self.next).set_previous(new_node);
+            }
+        }
+        self.set_next(new_node);
 
-                for (i, (_, loc)) in (*new).iter_mut().enumerate() {
-                    if *loc != null_mut() {
-                        (**loc).node = new;
-                        (**loc).position = i;
+        (new_node, loc.into())
+    }
+
+    /// Insert value into non-full [Node] at position `i`, returning a [Ref]
+    /// to the value.
+    ///
+    /// # Panics
+    ///
+    /// Panics, if insertion would result in a sparse array or is out of bounds.
+    fn insert_non_full(&mut self, i: u8, val: T) -> Ref<T, N> {
+        let loc = Location::new(self, i + self.start);
+        let new_val = MaybeUninit::new((val, loc));
+        let reference: Ref<T, N> = loc.into();
+
+        if i == 0 && self.start != 0 {
+            // Prepend in free space at the start of the array
+            self.start -= 1;
+            self.values[self.start as usize] = new_val;
+            unsafe {
+                (*loc).position = self.start;
+            }
+            reference
+        } else if i + self.start == self.end {
+            // Append as last value
+            self.values[self.end as usize] = new_val;
+            self.end += 1;
+            reference
+        } else {
+            assert!(
+                i + self.start <= self.end,
+                "value insertion would result in sparse array"
+            );
+
+            // See shifting to which side is cheaper
+            let shift_left =
+                self.start != 0 && i <= (self.end - self.start) / 2;
+            let i = (self.start + i) as usize;
+            if shift_left {
+                // Shift all preceding values to the left
+                unsafe {
+                    copy(
+                        self.values[i].as_mut_ptr(),
+                        self.values[i - 1].as_mut_ptr(),
+                        i,
+                    );
+                }
+                self.start -= 1;
+                for (_, loc) in self.iter_mut().take(i) {
+                    unsafe {
+                        (**loc).position -= 1;
+                    }
+                }
+            } else {
+                // Shift all following values to the right
+                unsafe {
+                    copy(
+                        self.values[i].as_mut_ptr(),
+                        self.values[i + 1].as_mut_ptr(),
+                        self.end as usize - i,
+                    );
+                }
+                self.end += 1;
+                for (_, loc) in self.iter_mut().skip(i + 1) {
+                    unsafe {
+                        (**loc).position += 1;
                     }
                 }
             }
 
-            self.vals[i] = Self::wrap_value(val);
-            self.set_length(i + 1);
-
-            if self.next != null_mut() {
-                unsafe {
-                    (*self.next).set_previous(new);
-                }
-            }
-            self.set_next(new);
-
-            return new;
-        }
-    }
-
-    /// Insert value into non-full node at position `i`
-    ///
-    /// # Panics
-    ///
-    /// Panics, if insertion would result in a sparse array.
-    fn insert_non_full(&mut self, i: usize, val: T) {
-        let len = self.len();
-        assert!(i <= len, "value insertion would result in sparse array");
-
-        let mut next = Self::wrap_value(val);
-
-        // Insert as last value
-        if i == len {
-            self.vals[i] = next;
-            self.set_length(len + 1);
-            return;
-        }
-
-        // Shift all following values
-        let mut i = i;
-        loop {
-            std::mem::swap(&mut next, &mut self.vals[i]);
-            unsafe {
-                let loc = (*next.as_mut_ptr()).1;
-                if loc != null_mut() {
-                    (*loc).position += 1
-                }
-            }
-            i += 1;
-            if i == len {
-                self.vals[i] = next;
-                self.set_length(len + 1);
-                return;
-            }
+            reference
         }
     }
 
     /// Remove value at position `i`.
+    /// Returns the removed value, a [NullRef] to the removed value's
+    /// position before removal and, if the [Node] itself was removed.
     ///
-    /// Returns the removed value and a reference to the removed value, if one
-    /// was ever taken for it.
-    ///
-    /// Empty nodes with either a previous or next node are removed.
-    /// A node that has neither a previous nor next node will never be removed.
+    /// Empty [Node]s with either a previous or next [Node] are removed.
+    /// A [Node] that has neither a previous nor next node will never be removed.
     ///
     /// # Panics
     ///
@@ -375,73 +343,94 @@ where
     ///
     /// # Safety
     ///
-    /// Removing a value will invalidate any NodeRef pointing to it. It is the
-    /// caller's responsibility to remove any NodeRef to a removed Node.
+    /// Removing a value will invalidate any [Ref] pointing to it. It is the
+    /// caller's responsibility to remove any [Ref]s to a removed [Node].
+    ///
+    /// A removed [Node] is deallocated by this function. The caller should not
+    /// access it anymore.
+    //
+    // TODO: make all nodes removable
     pub unsafe fn remove(
         node: *mut Self,
-        mut i: usize,
-    ) -> (T, Option<NullNodeRef<T, N>>) {
+        mut i: u8,
+    ) -> (T, NullRef<T, N>, bool) {
         let this = &mut *node;
+        i += this.start;
+        assert!(i < this.end, "value removal out of bounds");
 
-        let len = this.len();
-        assert!(i < len, "value removal out of bounds");
-
-        let mut tuple = MaybeUninit::uninit();
-        copy_nonoverlapping(this.vals[i].as_ptr(), tuple.as_mut_ptr(), 1);
-        let (val, loc) = tuple.assume_init();
-        let loc = if loc == null_mut() {
-            None
-        } else {
-            Some(loc.into())
+        let (val, loc) = {
+            let mut tuple = MaybeUninit::uninit();
+            copy_nonoverlapping(
+                this.values[i as usize].as_ptr(),
+                tuple.as_mut_ptr(),
+                1,
+            );
+            let (val, loc) = tuple.assume_init();
+            (val, loc.into())
         };
 
-        if len == 1 {
+        if this.len() == 1 {
             // Ensure only the first node in an empty list can have zero
             // length
-            let prev = this.previous();
-            if prev == null_mut() && this.next() == null_mut() {
-                this.set_length(0);
+            if this.previous == null_mut() && this.next == null_mut() {
+                this.end = 0;
             } else {
-                if prev != null_mut() {
-                    (*prev).set_previous(this.next);
+                if this.previous != null_mut() {
+                    (*this.previous).set_previous(this.next);
                 } else {
                     // This node was the head
-                    (*this.next()).set_previous(null_mut());
+                    (*this.next).previous = null_mut();
                 }
                 node.drop_in_place();
+                return (val, loc, true);
             }
-
-            (val, loc)
+        } else if i == this.start {
+            // Cheaply invalidate the first value
+            this.start += 1;
+        } else if i == this.end - 1 {
+            // Cheaply invalidate the last value
+            this.end -= 1;
         } else {
-            this.set_length(len - 1);
-
-            // Shift all nodes to the left
-            i += 1;
-            while i < len {
-                let loc = (*this.vals[i].as_mut_ptr()).1;
-                if loc != null_mut() {
-                    (*loc).position = i - 1;
-                }
-
-                copy_nonoverlapping(
-                    this.vals[i].as_ptr(),
-                    this.vals[i - 1].as_mut_ptr(),
-                    1,
+            // See shifting which side is cheaper
+            if i - this.start <= this.end - i {
+                // Shift all preceding values to the right
+                let start = this.start as usize;
+                let copying = i as usize - start;
+                copy(
+                    this.values[start].as_mut_ptr(),
+                    this.values[start + 1].as_mut_ptr(),
+                    copying,
                 );
-                i += 1;
+                this.start += 1;
+                for (_, loc) in this.iter_mut().take(copying) {
+                    (**loc).position += 1;
+                }
+            } else {
+                // Shift all following values to the left
+                let start = i as usize;
+                let copying = this.end as usize - start;
+                copy(
+                    this.values[start + 1].as_mut_ptr(),
+                    this.values[start].as_mut_ptr(),
+                    copying,
+                );
+                this.end -= 1;
+                for (_, loc) in this.iter_mut().rev().take(copying) {
+                    (**loc).position -= 1;
+                }
             }
-
-            (val, loc)
         }
+
+        (val, loc, false)
     }
 
-    /// Create iterator over the node's value-reference pairs
+    /// Create iterator over the [Node]'s value-reference pairs
     #[inline]
     fn iter_mut(
         &mut self,
-    ) -> impl Iterator<Item = &'_ mut (T, *mut Location<T, N>)> {
-        let len = self.len();
-        self.vals[..len]
+    ) -> impl Iterator<Item = &'_ mut (T, *mut Location<T, N>)> + DoubleEndedIterator
+    {
+        self.values[self.start as usize..self.end as usize]
             .iter_mut()
             .map(|p| unsafe { &mut *p.as_mut_ptr() })
     }
@@ -452,19 +441,16 @@ where
     T: Sized,
 {
     fn drop(&mut self) {
-        let len = self.len();
-        let mut i = 0;
+        let mut i = self.start;
         unsafe {
-            while i < len {
+            while i < self.end {
                 let mut tmp = MaybeUninit::uninit();
-                copy_nonoverlapping(self.vals[i].as_ptr(), tmp.as_mut_ptr(), 1);
-
-                let (_, loc) = tmp.assume_init(); // Drop value
-
-                // Drop location
-                if loc != null_mut() {
-                    loc.drop_in_place();
-                }
+                copy_nonoverlapping(
+                    self.values[i as usize].as_ptr(),
+                    tmp.as_mut_ptr(),
+                    1,
+                );
+                tmp.assume_init().1.drop_in_place(); // Drop value and location
 
                 i += 1;
             }
@@ -472,7 +458,7 @@ where
     }
 }
 
-/// Describes the location of a value in a linked list
+/// Describes the location of a value in a [LinkedList]
 #[derive(Eq, PartialEq, Clone)]
 struct Location<T, const N: usize>
 where
@@ -485,9 +471,15 @@ where
     position: usize,
 }
 
-/// Storable reference to a Node
+impl<T, const N: usize> Location<T, N> {
+    fn new(node: *mut Node<T, N>, i: usize) -> *mut Self {
+        Box::into_raw(Box::new(Location { node, position: i }))
+    }
+}
+
+/// Storable reference to a [Node]'s value
 #[derive(Eq, Clone)]
-pub struct NodeRef<T, const N: usize>
+pub struct Ref<T, const N: usize>
 where
     T: Sized,
 {
@@ -495,17 +487,21 @@ where
     location: *mut Location<T, N>,
 }
 
-impl<T, const N: usize> NodeRef<T, N>
+impl<T, const N: usize> Ref<T, N>
 where
     T: Sized + 'static,
 {
-    /// Obtain a mutable cursor to the referenced Node.
+    // TODO: immutable cursor
+
+    /// Obtain a mutable cursor to the referenced [Node].
     ///
     /// # Safety
-    /// This method is only safe to call with the same list that the NodeRef was
-    /// obtained from, and only if the Node has not been removed from the list.
-    /// It is the caller's responsibility to remove any NodeRef to a removed
-    /// Node.
+    ///
+    /// This method is only safe to call with the same [LinkedList] that the
+    /// [Ref] was obtained from, and only if the [Node] has not been removed
+    /// from the list yet.
+    /// It is the caller's responsibility to remove any [Ref] to a removed
+    /// [Node].
     #[inline]
     pub unsafe fn cursor_mut<'a>(
         &self,
@@ -515,7 +511,7 @@ where
     }
 }
 
-impl<T, const N: usize> From<*mut Location<T, N>> for NodeRef<T, N>
+impl<T, const N: usize> From<*mut Location<T, N>> for Ref<T, N>
 where
     T: Sized,
 {
@@ -525,39 +521,41 @@ where
     }
 }
 
-impl<T, const N: usize> PartialEq for NodeRef<T, N>
+impl<T, const N: usize> PartialEq for Ref<T, N>
 where
     T: Sized,
 {
     #[inline]
-    fn eq(&self, other: &NodeRef<T, N>) -> bool {
+    fn eq(&self, other: &Ref<T, N>) -> bool {
         self.location == other.location
     }
 }
 
-impl<T, const N: usize> PartialEq<NullNodeRef<T, N>> for NodeRef<T, N>
+impl<T, const N: usize> PartialEq<NullRef<T, N>> for Ref<T, N>
 where
     T: Sized,
 {
     #[inline]
-    fn eq(&self, other: &NullNodeRef<T, N>) -> bool {
+    fn eq(&self, other: &NullRef<T, N>) -> bool {
         self == &other.0
     }
 }
 
-/// Reference to a removed Node. Can be used for equality comparison with
-/// NodeRef.
+/// Reference to a removed node value. Can be used for equality comparison with
+/// [Ref].
 ///
-/// NullNodeRef must be used to remove any stored NodeRef before any new node is
-/// inserted, because there is small but non-zero chance, that a new node
-/// will contain the same pointers as a previous node and thus be considered
-/// equal.
+/// [NullRef] must be used to remove any stored [Ref] before any new
+/// [Node] is inserted, because there is small but non-zero chance, that a new
+/// [Node] will contain the same pointer as a previous [Node] and thus be
+/// considered equal.
 #[derive(Clone)]
-pub struct NullNodeRef<T, const N: usize>(NodeRef<T, N>)
+//
+// `NullRef` owns the contained `Location` pointer.
+pub struct NullRef<T, const N: usize>(Ref<T, N>)
 where
     T: Sized;
 
-impl<T, const N: usize> From<*mut Location<T, N>> for NullNodeRef<T, N>
+impl<T, const N: usize> From<*mut Location<T, N>> for NullRef<T, N>
 where
     T: Sized,
 {
@@ -567,12 +565,159 @@ where
     }
 }
 
-impl<T, const N: usize> PartialEq<NodeRef<T, N>> for NullNodeRef<T, N>
+impl<T, const N: usize> PartialEq<Ref<T, N>> for NullRef<T, N>
 where
     T: Sized,
 {
     #[inline]
-    fn eq(&self, other: &NodeRef<T, N>) -> bool {
+    fn eq(&self, other: &Ref<T, N>) -> bool {
         &self.0 == other
+    }
+}
+
+impl<T, const N: usize> Drop for NullRef<T, N>
+where
+    T: Sized,
+{
+    fn drop(&mut self) {
+        // `NullRef` owns the contained `Location` pointer, so drop them
+        // together
+        unsafe {
+            self.0.location.drop_in_place();
+        }
+    }
+}
+
+/// Cursor for accessing and traversing a single [Node]
+pub struct NodeCursor<T, const N: usize>
+where
+    T: Sized,
+{
+    /// [Node] being accessed
+    node: *mut Node<T, N>,
+
+    /// Current cursor position in the [Node]
+    position: usize,
+}
+
+impl<T, const N: usize> NodeCursor<T, N>
+where
+    T: Sized,
+{
+    /// Shorthand for returning reference to the current [Node]
+    #[inline]
+    fn node(&mut self) -> &'_ mut Node<T, N> {
+        unsafe { &mut *self.node }
+    }
+
+    // Tries to advances cursor to the next position.
+    /// Returns false, if there is no next position and the cursor did not
+    /// advance.
+    #[inline] // To avoid function call overhead on iteration
+    pub fn next(&mut self) -> bool {
+        let mut i = self.position;
+        loop {
+            if i == N - 1 {
+                return false;
+            }
+
+            i += 1;
+            if !self.node().references[i].is_null() {
+                self.position = i;
+                return true;
+            }
+        }
+    }
+
+    /// Tries to move cursor to the previous position.
+    /// Returns false, if there is no previous position and the cursor did not
+    /// move.
+    #[inline] // To avoid function call overhead on iteration
+    pub fn previous(&mut self) -> bool {
+        let mut i = self.position;
+        loop {
+            if i == 0 {
+                return false;
+            }
+
+            i -= 1;
+            if !self.node().references[i].is_null() {
+                self.position = i;
+                return true;
+            }
+        }
+    }
+
+    /// Insert value before the current cursor position, returning a [Ref]
+    /// to the inserted value.
+    /// Returns [None], if [Node] is full.
+    pub fn insert_before(&mut self, val: T) -> Option<Ref<T, N>> {
+        if self.position != 0
+            && self.node().references[self.position - 1].is_null()
+        {
+            todo!()
+        }
+
+        self.find_closest_empty().map(|i| {
+            if i < self.position {
+                self.node().shift(i, self.position - i, -1);
+            } else {
+                self.node().shift(self.position, i - self.position, 1);
+            }
+            todo!("insert")
+        })
+    }
+
+    /// Find the empty slot closest to the current position.
+    /// Returns [None], if [Node] is full.
+    fn find_closest_empty(&self) -> Option<usize> {
+        if self.node().length == N {
+            return None;
+        }
+
+        let refs = &self.node().references;
+
+        // The current position can not be empty
+        debug_assert!(!refs[self.position].is_null());
+
+        let pos = self.position as isize;
+        let mut off = 1_isize;
+        loop {
+            let left = pos - off;
+            let right = pos + off;
+
+            // Prevent continuously checking out of bounds
+            if left <= 0 {
+                return Some(
+                    right as usize
+                        + refs[right as usize..]
+                            .iter()
+                            .position(|l| l.is_null())
+                            .unwrap(),
+                );
+            }
+            if right == N as isize {
+                return Some(
+                    left as usize
+                        - refs[..left as usize]
+                            .iter()
+                            .rev()
+                            .position(|l| l.is_null())
+                            .unwrap(),
+                );
+            }
+
+            macro_rules! check {
+                ($i:expr) => {
+                    if refs[$i as usize].is_null() {
+                        return Some($i as usize);
+                    }
+                };
+            }
+            check!(left);
+            check!(right);
+
+            off += 1;
+        }
     }
 }

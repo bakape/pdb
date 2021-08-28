@@ -4,13 +4,15 @@ use super::LinkedList;
 use crate::alloc::linked_list::node::Node;
 use std::{collections::VecDeque, fmt::Debug, ptr::null_mut};
 
+// TODO: also compare using immutable iterators
+
 // Generate tests with various node sizes
 macro_rules! gen_tests {
     ($name:ident) => {
         mod $name {
             // Start with 4, so the first `Run Test` in the IDE is
             // has multiple values per node
-            gen_tests! {@for_sizes $name {4 1 2 8 15 16 17 32 64 128}}
+            gen_tests! {@for_sizes $name {4 2 8 15 16 17 32 64 128}}
         }
     };
     (@for_sizes $name:ident { $( $size:literal )* }) => {
@@ -33,10 +35,10 @@ fn test_linear_inserts<const N: usize>() {
     for i in 0..256 {
         c.next();
         c.insert_after(i);
-        validate(&mut c.list);
+        validate(c.list_mut());
 
         std.push_back(i);
-        compare(&std, &mut c.list);
+        compare(&std, c.list_mut());
     }
 }
 
@@ -76,10 +78,10 @@ fn test_insert_before<const N: usize>() {
         c.insert_before(i);
         pos += 1;
 
-        validate(&mut c.list);
+        validate(c.list_mut());
 
         std.insert(mid, i);
-        compare(&std, &mut c.list);
+        compare(&std, c.list_mut());
     }
 }
 
@@ -102,10 +104,10 @@ fn test_insert_after<const N: usize>() {
 
         c.insert_after(i);
 
-        validate(&mut c.list);
+        validate(c.list_mut());
 
         std.insert(if i == 0 { 0 } else { mid + 1 }, i);
-        compare(&std, &mut c.list);
+        compare(&std, c.list_mut());
     }
 }
 
@@ -139,12 +141,12 @@ where
         assert_eq!(ll.tail, ll.head);
     }
 
-    let mut node_length = 0;
+    let mut node_length = 0_usize;
     let mut node = ll.head;
     let mut prev: *mut Node<T, N> = null_mut();
     while node != null_mut() {
         unsafe {
-            node_length += (*node).len();
+            node_length += (*node).len() as usize;
 
             if prev != null_mut() {
                 assert_eq!((*prev).next(), node);
@@ -155,7 +157,10 @@ where
             node = (*node).next();
         }
     }
-    assert_eq!(node_length, ll.len());
+    assert_eq!(node_length as usize, ll.len());
+
+    // TODO: validate referential consistency, including checking the next and
+    // previous node
 }
 
 /// Assert the list from standard library and allocator list are equal.

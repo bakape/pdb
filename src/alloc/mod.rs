@@ -1,18 +1,33 @@
 mod free_list;
 mod linked_list;
-mod lru_map;
 
+use self::free_list::FreeList;
+use lazy_static::lazy_static;
 use std::{
-    borrow::BorrowMut,
     collections::VecDeque,
     ops::{Deref, DerefMut},
     ptr::null_mut,
-    sync::RwLock,
+    sync::{Arc, Mutex, RwLock},
     time::Instant,
     usize,
 };
 
-use self::free_list::FreeList;
+lazy_static! {
+    /// Global Allocator instance
+    static ref ALLOCATOR: Mutex<Allocator> = Default::default();
+
+    // TODO: allow bumping usage time w/o allocator lock via a eventual
+    // consistency updates:
+    // - have global Mutex<HashMap<page_id, last_used_time>>
+    // - insert into map on each page use
+    // - take() and merge map into LRU max heap, when we need to look for a
+    //   pages to swap
+    // - when merging, filter currently returned pages
+    // - when a page is retuned, remove it from the LRU HEAP
+    // - bump LRU both on non-allocator lock acquisition and release to prevent
+    //   the page from being swapped while in use
+    //
+}
 
 /// Wraps a pointer to an allocated fixed size buffer with dropping and
 // dereferencing to a slice
@@ -57,7 +72,7 @@ impl<const CAP: usize> DerefMut for Buffer<CAP> {
 
 unsafe impl<const CAP: usize> Send for Buffer<CAP> {}
 
-/// Stores `Page`s in a more compact compressed format, only storing the used
+/// Stores [Page]'s in a more compact compressed format, only storing the used
 /// memory of a `Page`.
 struct ZswapPage {
     /// Underlying memory buffer.
@@ -89,7 +104,7 @@ struct PageInner {
 
 impl Drop for PageInner {
     fn drop(&mut self) {
-        with_allocator(|a| a.release_page(self));
+        ALLOCATOR.lock().unwrap().release_page(self);
     }
 }
 
@@ -99,62 +114,50 @@ pub struct Page(RwLock<PageInner>);
 // Swapping, compressing table, aggregate and index allocator
 #[derive(Default)]
 struct Allocator {
-    /// Underlying 4 KB memory pages for swapping `Page`s into
+    /// Underlying 4 KB memory pages for swapping [Page] into
+    zswap_pages: VecDeque<ZswapPage>,
+
+    /// Unused allocated in-memory pages
+    free_pages: Vec<Buffer<{ 4 << 10 }>>,
     //
     // TODO: each 100 ms (configurable) defragment up to 4 pages from the back
     // and move them to the front
     //
-    // TODO: some sort of data structure for enabling both finding a page by ID
-    // and ordering pages by fragmentation to pick the least fragmented one for
-    // new allocations
-    zswap_pages: VecDeque<ZswapPage>,
-
-    // TODO: page registry via LRU map
-    // TODO: allow bumping usage time w/o allocator lock via separate mutex
+    // TODO: HashMap for finding pages by ID
     //
-    /// Unused pages not yet returned to the operating system.
-    /// Stored together with their monotonous insertion time.
+    // TODO: see, if we can somehow cheaply perform opportunistic
+    // defragmentation on dump to disk
     //
-    // TODO: keep a small pool of pages (4?) in reserve for allocator purposes
-    free_pages: VecDeque<(Instant, Buffer<{ 4 << 10 }>)>,
+    // TODO: each compressed page in a file dumped to disk should be its own LZ4
+    // buffer, so that you can read them one by one, as needed
+    // TODO: a page being read from disk should not block the allocator. We can
+    // block the requesting thread instead.
+    //
+    // TODO: algo for determining, if a ZSWAPed page should be dumped to disk:
+    // - dump everything older than a minute (configurable) + add t/o between
+    //   dumps (configurable)
+    // - if the amount of ZSWAP pages reaches a threshold (70%, configurable),
+    //   dump until the threshold + add t/o between dumps (configurable)
 }
 
+// Allocator is only accessed from behind a mutex, so this is fine
+unsafe impl Send for Allocator {}
+
 impl Allocator {
-    fn get_page(&mut self) -> Result<Page, String> {
+    fn get_page(&mut self) -> Result<Arc<Page>, String> {
         todo!()
     }
 
     fn release_page(&mut self, p: &mut PageInner) {
         // Return buffer to allocator
-        self.free_pages
-            .push_back((Instant::now(), Buffer { ptr: p.buffer.ptr }));
+        self.free_pages.push(Buffer { ptr: p.buffer.ptr });
         p.buffer.ptr = null_mut(); // Prevent double free
 
         todo!("unregister page")
     }
 }
 
-/// Run function with global page allocator as an argument, acquiring exclusive
-/// access to it
-fn with_allocator<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut Allocator) -> R,
-{
-    use std::sync::{Mutex, Once};
-
-    static ONCE: Once = Once::new();
-    static mut ALLOCATOR: Option<Mutex<Allocator>> = None;
-    ONCE.call_once(|| unsafe {
-        ALLOCATOR = Some(Default::default());
-    });
-
-    f(&mut *unsafe { ALLOCATOR.as_ref().unwrap() }
-        .lock()
-        .unwrap()
-        .borrow_mut())
-}
-
 /// Acquire a 4 KB page for column, index and aggregate allocations
-pub fn get_page() -> Result<Page, String> {
-    with_allocator(|a| a.get_page())
+pub fn get_page() -> Result<Arc<Page>, String> {
+    ALLOCATOR.lock().unwrap().get_page()
 }

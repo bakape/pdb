@@ -10,17 +10,29 @@ use std::{
     ptr::null_mut,
 };
 
-pub use node::{NodeRef, NullNodeRef};
+pub use node::{NullRef, Ref};
 
 use self::cursor::CursorMut;
 
 // TODO: write benchmarks to find the right capacity for each application.
-// Bigger lists have more cache-local values but also require more NodeRef
+// Bigger lists have more cache-local values but also require more Ref
 // updates on shifting, which produce cache misses.
 
-/// Doubly-linked unrolled list with cursor iteration and reference storage
-/// support.
-/// Stores type T in N-sized nodes.
+// TODO: implement sorting
+
+/// Doubly-linked unrolled list with cursor iteration and stable item
+/// referencing.
+///
+/// Stores type `T` in `N`-sized nodes.
+/// Choice of `N` can have a drastic impact on performance. Impact depends on
+/// the size of `T` and the prevalence of insertions and deletions over
+/// sequential access and non-reordering mutations.
+/// 4 or 8 are generally good default choices.
+///
+/// [LinkedList] is optimized for situations, where ou mostly do linear seeking
+/// of the list but sometimes need to quickly navigate to a specific item.
+///
+/// [LinkedList] can be used as is or as ordered storage for other collections.
 pub struct LinkedList<T, const N: usize>
 where
     T: Sized,
@@ -34,8 +46,6 @@ where
     /// Cached for cheap lookup
     length: usize,
 }
-
-unsafe impl<T, const N: usize> Send for LinkedList<T, N> where T: Sized + Send {}
 
 impl<T, const N: usize> Drop for LinkedList<T, N>
 where
@@ -55,11 +65,9 @@ where
     /// Create new empty list
     #[inline]
     pub fn new() -> Self {
-        // List must never have zero nodes
-        let n = Node::empty();
         Self {
-            head: n,
-            tail: n,
+            head: null_mut(),
+            tail: null_mut(),
             length: 0,
         }
     }
@@ -76,22 +84,22 @@ where
         self.length
     }
 
+    // TODO: Immutable iteration
+
     /// Return a forward mutable iterator over the list
     pub fn iter_mut(
         &mut self,
-    ) -> impl ExactSizeIterator<Item = &'_ mut T> + FusedIterator<Item = &'_ mut T>
-    {
+    ) -> impl ExactSizeIterator<Item = &'_ mut T> + FusedIterator {
         IterMut::<'_, T, Forward, N>::new(self.cursor_mut())
     }
 
     /// Return a backward mutable iterator over the list
     pub fn iter_mut_reverse(
         &mut self,
-    ) -> impl ExactSizeIterator<Item = &'_ mut T> + FusedIterator<Item = &'_ mut T>
-    {
+    ) -> impl ExactSizeIterator<Item = &'_ mut T> + FusedIterator {
         IterMut::<'_, T, Backward, N>::new({
             let mut c = self.cursor_mut();
-            c.to_end();
+            c.seek_to_end();
             c
         })
     }
@@ -131,7 +139,7 @@ impl Advance for Backward {
     }
 }
 
-/// Forward iterator for cursors
+/// Directional iterator for [LinkedList]
 struct IterMut<'a, T, A, const N: usize>
 where
     T: Sized + 'static,
@@ -189,7 +197,7 @@ where
 {
     #[inline]
     fn len(&self) -> usize {
-        self.cursor.list.len()
+        self.cursor.list().len()
     }
 }
 

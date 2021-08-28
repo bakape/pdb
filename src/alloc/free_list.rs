@@ -1,4 +1,4 @@
-use super::linked_list::{LinkedList, NodeRef};
+use super::linked_list::{LinkedList, Ref};
 
 /// Range of memory in a buffer
 #[derive(Clone, Eq, PartialEq)]
@@ -11,9 +11,10 @@ struct Range {
 }
 
 impl Range {
-    /// Modifying the range to allocate a buffer in its start and return the
+    /// Modify the [Range] to allocate a buffer at its start and return the
     // allocation's offset.
-    /// The caller must ensure the range has more capacity than needed.
+    /// The caller must ensure the [Range] has more capacity than needed for the ///
+    /// allocation.
     fn allocate(&mut self, size: usize) -> usize {
         let off = self.offset;
         self.offset += size;
@@ -28,10 +29,10 @@ pub struct FreeList {
     list: LinkedList<Range, 8>,
 
     /// Last inserted into free memory range
-    last_used: Option<NodeRef<Range, 8>>,
+    last_used: Option<Ref<Range, 8>>,
 }
 
-/// Result of an `insert()` call to the FreeList
+/// Result of [`FreeList.allocate()`]
 pub enum AllocationResult {
     /// Successfully allocated. Contains the offset of the allocation.
     Allocated(usize),
@@ -59,12 +60,13 @@ impl FreeList {
     }
 
     /// Pad size to ensure all free ranges are aligned
+    #[inline]
     fn pad_size(size: &mut usize) {
         const WORD: usize = std::mem::size_of::<usize>();
         *size += WORD - (*size % WORD);
     }
 
-    /// Tries to register an insertion in the free list and returns the offset
+    /// Tries to register an insertion in the free list and return the offset
     // to write the data to, if a space for it can be found.
     pub fn allocate(&mut self, mut size: usize) -> AllocationResult {
         // Using a first-fit algorithm. Expect faster lookup times to outweigh
