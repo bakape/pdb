@@ -26,10 +26,10 @@ impl Range {
 /// Doubly linked list for keeping track of free memory ranges in a page
 pub struct FreeList {
     /// Underlying free range linked list
-    list: LinkedList<Range, 8>,
+    list: LinkedList<Range>,
 
     /// Last inserted into free memory range
-    last_used: Option<Ref<Range, 8>>,
+    last_used: Option<Ref<Range>>,
 }
 
 /// Result of [`FreeList.allocate()`]

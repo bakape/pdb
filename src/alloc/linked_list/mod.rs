@@ -23,42 +23,33 @@ use self::cursor::CursorMut;
 /// Doubly-linked unrolled list with cursor iteration and stable item
 /// referencing.
 ///
-/// Stores type `T` in `N`-sized nodes.
-/// Choice of `N` can have a drastic impact on performance. Impact depends on
-/// the size of `T` and the prevalence of insertions and deletions over
-/// sequential access and non-reordering mutations.
-/// 4 or 8 are generally good default choices.
-///
-/// [LinkedList] is optimized for situations, where ou mostly do linear seeking
-/// of the list but sometimes need to quickly navigate to a specific item.
-///
 /// [LinkedList] can be used as is or as ordered storage for other collections.
-pub struct LinkedList<T, const N: usize>
+pub struct LinkedList<T>
 where
     T: Sized,
 {
-    /// First node of list. Guaranteed to never be null.
-    head: *mut Node<T, N>,
+    /// First node of list
+    head: *mut Node<T>,
 
-    /// Last node of the list. Guaranteed to never be null.
-    tail: *mut Node<T, N>,
+    /// Last node of the list
+    tail: *mut Node<T>,
 
     /// Cached for cheap lookup
     length: usize,
 }
 
-impl<T, const N: usize> Drop for LinkedList<T, N>
+impl<T> Drop for LinkedList<T>
 where
     T: Sized,
 {
     fn drop(&mut self) {
         if self.head != null_mut() {
-            unsafe { Box::from_raw(self.head).drop_list() };
+            unsafe { Box::from_raw(self.head) }.drop_list();
         }
     }
 }
 
-impl<T, const N: usize> LinkedList<T, N>
+impl<T> LinkedList<T>
 where
     T: Sized + 'static,
 {
@@ -74,8 +65,8 @@ where
 
     /// Creates a cursor for iterating and manipulating the list
     #[inline]
-    pub fn cursor_mut(&mut self) -> CursorMut<'_, T, N> {
-        unsafe { CursorMut::new(self, self.head, 0) }
+    pub fn cursor_mut(&mut self) -> CursorMut<'_, T> {
+        unsafe { CursorMut::new(self, self.head) }
     }
 
     /// Returns the length of the list
@@ -90,14 +81,14 @@ where
     pub fn iter_mut(
         &mut self,
     ) -> impl ExactSizeIterator<Item = &'_ mut T> + FusedIterator {
-        IterMut::<'_, T, Forward, N>::new(self.cursor_mut())
+        IterMut::<'_, T, Forward>::new(self.cursor_mut())
     }
 
     /// Return a backward mutable iterator over the list
     pub fn iter_mut_reverse(
         &mut self,
     ) -> impl ExactSizeIterator<Item = &'_ mut T> + FusedIterator {
-        IterMut::<'_, T, Backward, N>::new({
+        IterMut::<'_, T, Backward>::new({
             let mut c = self.cursor_mut();
             c.seek_to_end();
             c
@@ -108,7 +99,7 @@ where
 /// Advances a cursor in a direction
 trait Advance {
     /// Try to advance the cursor in a direction and return, if it was
-    fn try_advance<'a, T, const N: usize>(c: &mut CursorMut<'a, T, N>) -> bool
+    fn try_advance<'a, T>(c: &mut CursorMut<'a, T>) -> bool
     where
         T: Sized + 'static;
 }
@@ -118,7 +109,7 @@ struct Forward;
 
 impl Advance for Forward {
     #[inline]
-    fn try_advance<'a, T, const N: usize>(c: &mut CursorMut<'a, T, N>) -> bool
+    fn try_advance<'a, T>(c: &mut CursorMut<'a, T>) -> bool
     where
         T: Sized + 'static,
     {
@@ -131,7 +122,7 @@ struct Backward;
 
 impl Advance for Backward {
     #[inline]
-    fn try_advance<'a, T, const N: usize>(c: &mut CursorMut<'a, T, N>) -> bool
+    fn try_advance<'a, T>(c: &mut CursorMut<'a, T>) -> bool
     where
         T: Sized + 'static,
     {
@@ -140,22 +131,22 @@ impl Advance for Backward {
 }
 
 /// Directional iterator for [LinkedList]
-struct IterMut<'a, T, A, const N: usize>
+struct IterMut<'a, T, A>
 where
     T: Sized + 'static,
     A: Advance,
 {
     visited_first: bool,
-    cursor: CursorMut<'a, T, N>,
+    cursor: CursorMut<'a, T>,
     pd: PhantomData<A>,
 }
 
-impl<'a, T, A, const N: usize> IterMut<'a, T, A, N>
+impl<'a, T, A> IterMut<'a, T, A>
 where
     T: Sized + 'static,
     A: Advance,
 {
-    fn new(c: CursorMut<'a, T, N>) -> Self {
+    fn new(c: CursorMut<'a, T>) -> Self {
         Self {
             visited_first: false,
             cursor: c,
@@ -164,7 +155,7 @@ where
     }
 }
 
-impl<'a, T, A, const N: usize> Iterator for IterMut<'a, T, A, N>
+impl<'a, T, A> Iterator for IterMut<'a, T, A>
 where
     T: Sized + 'static,
     A: Advance,
@@ -190,7 +181,7 @@ where
     }
 }
 
-impl<'a, T, A, const N: usize> ExactSizeIterator for IterMut<'a, T, A, N>
+impl<'a, T, A> ExactSizeIterator for IterMut<'a, T, A>
 where
     T: Sized + 'static,
     A: Advance,
@@ -201,14 +192,14 @@ where
     }
 }
 
-impl<'a, T, A, const N: usize> FusedIterator for IterMut<'a, T, A, N>
+impl<'a, T, A> FusedIterator for IterMut<'a, T, A>
 where
     T: Sized + 'static,
     A: Advance,
 {
 }
 
-impl<T, const N: usize> FromIterator<T> for LinkedList<T, N>
+impl<T> FromIterator<T> for LinkedList<T>
 where
     T: Sized + 'static,
 {

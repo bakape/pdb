@@ -1,41 +1,42 @@
 use super::{
-    node::{Node, NodeCursor, NullRef, Ref},
+    node::{Node, NullRef, Ref},
     LinkedList,
 };
-use std::ptr::null_mut;
+use std::ptr::{null_mut, NonNull};
 
 // TODO: Immutable cursor
 
 /// Common functionality for both [Cursor] and [CursorMut]
-struct Common<T, L, const N: usize>
+struct Common<T, L>
 where
     T: Sized,
-    L: VisitRef<LinkedList<T, N>>,
+    L: VisitRef<LinkedList<T>>,
 {
-    /// Cursor over the current [Node]. Only [None], if list is empty.
-    cursor: Option<NodeCursor<T, N>>,
+    /// Current cursor position.
+    /// /Can only be null, if parent [LinkedList] is empty.
+    node: *mut Node<T>,
 
     /// Parent [LinkedList]
     list: L,
 }
 
-impl<T, L, const N: usize> Common<T, L, N>
+impl<T, L> Common<T, L>
 where
     T: Sized,
-    L: VisitRef<LinkedList<T, N>>,
+    L: VisitRef<LinkedList<T>>,
 {
     /// Tries to advances cursor to the next position.
     /// Returns false, if there is no next position and the cursor did not
     /// advance.
     #[inline] // To avoid function call overhead on iteration
-    fn next(&mut self) -> bool {
-        if self.position as usize + 1 < self.node().len() as usize {
-            self.position += 1;
-            true
-        } else if self.node().next() != null_mut() {
-            // Next node can not have zero length
-            self.node = self.node().next();
-            self.position = 0;
+    pub fn next(&mut self) -> bool {
+        if self.node == null_mut() {
+            return false;
+        }
+
+        let next = unsafe { (*self.node).next };
+        if next != null_mut() {
+            self.node = next;
             true
         } else {
             false
@@ -47,15 +48,13 @@ where
     /// move.
     #[inline] // To avoid function call overhead on iteration
     fn previous(&mut self) -> bool {
-        if self.position != 0 {
-            self.position -= 1;
-            return true;
+        if self.node == null_mut() {
+            return false;
         }
 
-        let prev = self.node().previous();
+        let prev = unsafe { (*self.node).previous };
         if prev != null_mut() {
             self.node = prev;
-            self.position = self.node().len() - 1;
             true
         } else {
             false
@@ -71,27 +70,16 @@ where
     /// Navigate to the end of the [LinkedList]
     #[inline]
     fn seek_to_end(&mut self) {
-        // `self.node().len() -1` can be negative only in case of an empty list
-        if self.list.with(|ll| ll.length) == 0 {
-            self.seek_to_start();
-        } else {
-            // In all other cases a node can not be empty
-            self.node = self.list.with(|ll| ll.tail);
-            self.position = self.node().len() - 1;
-        }
+        self.node = self.list.with(|ll| ll.tail);
     }
 
     /// Returns a reference to the current value, that can be stored and used to
     /// construct cursors.
     ///
-    /// Only returns [None], if the current linked list is empty.
+    /// Only returns [None], if the [LinkedList] is empty.
     #[inline]
-    fn reference(&self) -> Option<Ref<T, N>> {
-        if self.node().len() == 0 {
-            None
-        } else {
-            Some(self.node().reference(self.position))
-        }
+    fn reference(&self) -> Option<Ref<T>> {
+        unsafe { self.node.as_mut() }.map(|n| n.into())
     }
 }
 
@@ -101,72 +89,64 @@ trait VisitRef<T> {
     fn with<R>(&self, visit: impl FnOnce(&T) -> R) -> R;
 }
 
-impl<'l, T, const N: usize> VisitRef<LinkedList<T, N>> for &'l LinkedList<T, N>
+impl<'l, T> VisitRef<LinkedList<T>> for &'l LinkedList<T>
 where
     T: Sized,
 {
     #[inline]
-    fn with<R>(&self, visit: impl FnOnce(&LinkedList<T, N>) -> R) -> R {
+    fn with<R>(&self, visit: impl FnOnce(&LinkedList<T>) -> R) -> R {
         visit(self)
     }
 }
 
-impl<'l, T, const N: usize> VisitRef<LinkedList<T, N>>
-    for &'l mut LinkedList<T, N>
+impl<'l, T> VisitRef<LinkedList<T>> for &'l mut LinkedList<T>
 where
     T: Sized,
 {
     #[inline]
-    fn with<R>(&self, visit: impl FnOnce(&LinkedList<T, N>) -> R) -> R {
+    fn with<R>(&self, visit: impl FnOnce(&LinkedList<T>) -> R) -> R {
         visit(self)
     }
 }
 
 /// Enables safe linked list iteration and modification
-pub struct CursorMut<'l, T, const N: usize>
+pub struct CursorMut<'l, T>
 where
     T: Sized,
 {
-    common: Common<T, &'l mut LinkedList<T, N>, N>,
+    common: Common<T, &'l mut LinkedList<T>>,
 }
 
-impl<'l, T, const N: usize> CursorMut<'l, T, N>
+impl<'l, T> CursorMut<'l, T>
 where
     T: Sized + 'static,
 {
     /// Create a cursor over the passed list, setting the cursor position to the
-    /// passed node.
-    /// `node` must not be null.
-    /// `position` is ignored, if node is empty.
+    /// passed `node`. `node` must not be null.
     #[inline]
     pub(super) unsafe fn new(
-        list: &'l mut LinkedList<T, N>,
-        node: *mut Node<T, N>,
-        position: usize,
+        list: &'l mut LinkedList<T>,
+        node: *mut Node<T>,
     ) -> Self {
         Self {
-            common: Common {
-                node,
-                position,
-                list,
-            },
+            common: Common { node, list },
         }
     }
 }
 
-impl<'c, 'l: 'c, T, const N: usize> CursorMut<'l, T, N>
+impl<'c, 'l: 'c, T> CursorMut<'l, T>
 where
     T: Sized + 'static,
 {
     /// Returns a reference to the parent list
     #[inline]
-    pub(super) fn list(&self) -> &LinkedList<T, N> {
+    pub(super) fn list(&self) -> &LinkedList<T> {
         self.common.list
     }
 
     /// Returns a mutable reference to the parent list
     #[cfg(test)]
-    pub(super) fn list_mut(&mut self) -> &mut LinkedList<T, N> {
+    pub(super) fn list_mut(&mut self) -> &mut LinkedList<T> {
         self.common.list
     }
 
@@ -198,130 +178,105 @@ where
 
     // TODO: move current value to the start or end of the list
 
-    /// Returns a reference to the current position's value.
-    /// Only returns None, if the current linked list is empty.
+    /// Returns a reference to the current node's value.
+    /// Only returns [None], if the [LinkedList] is empty.
     #[inline]
     pub fn value(&'c mut self) -> Option<&'l mut T> {
-        if self.node_mut().len() == 0 {
-            None
-        } else {
-            Some(self.node_mut().value_mut(self.common.position))
-        }
+        unsafe { self.common.node.as_mut() }.map(|n| n.value)
     }
 
-    /// Returns a reference to the current value, that can be stored and used to
+    /// Returns a [Ref] to the current node, that can be stored and used to
     /// construct cursors.
     ///
-    /// Only returns [None], if the current linked list is empty.
-    pub fn reference(&self) -> Option<Ref<T, N>> {
+    /// Only returns [None], if the [LinkedList] is empty.
+    pub fn reference(&self) -> Option<Ref<T>> {
         self.common.reference()
     }
 
-    /// Shorthand for accessing the current [Node] as a mutable reference
-    #[inline]
-    fn node_mut(&self) -> &mut Node<T, N> {
-        unsafe { &mut *self.common.node }
-    }
-
     /// Insert value before the current cursor position, returning a [Ref]
-    /// to the inserted value
-    pub fn insert_before(&mut self, val: T) -> Ref<T, N> {
+    /// to the inserted value.
+    ///
+    /// If the [LinkedList] is empty prior to this call, the cursor is navigated
+    /// to the inserted node.
+    pub fn insert_before(&mut self, val: T) -> Ref<T> {
         self.common.list.length += 1;
+        let n = Node::new(val);
 
-        let len = self.common.node().len();
-        if len == 0 {
-            self.common.position = 0;
-            self.node_mut().append(val)
-        } else if self.common.position == 0 && len == N as u8 {
-            // Append to previous node
-            let (new_node, r) = self.node_mut().append_to_previous(val);
-            if self.common.list.head == self.common.node {
-                self.common.list.head = new_node;
-            }
-            r
-        } else {
-            // Insert into current node and possibly split it
-            let (new_node, r) =
-                self.node_mut().insert(self.common.position, val);
-            if new_node != null_mut()
-                && self.common.list.tail == self.common.node
-            {
-                self.common.list.tail = new_node;
-            }
-
-            // Advance back to next value to maintain API consistency
-            self.next();
-
-            r
+        if self.common.node == null_mut() {
+            return self.insert_only(n);
         }
+
+        let prev = unsafe { (*self.common.node).previous };
+        if prev == null_mut() {
+            self.common.list.head = n;
+        }
+        unsafe { *self.common.node }.set_previous(n);
+        n.into()
     }
 
     /// Insert value before the current cursor position, returning a [Ref]  to
-    /// the inserted value
-    pub fn insert_after(&mut self, val: T) -> Ref<T, N> {
+    /// the inserted value.
+    ///
+    /// If the [LinkedList] is empty prior to this call, the cursor is navigated
+    /// to the inserted node.
+    pub fn insert_after(&mut self, val: T) -> Ref<T> {
         self.common.list.length += 1;
+        let n = Node::new(val);
 
-        let len = self.common.node().len();
-        if len == 0 {
-            // Append to start of node
-            self.common.position = 0;
-            self.node_mut().append(val)
-        } else if len == N as u8 && self.common.position == N as u8 - 1 {
-            // Prepend to next node
-            let (new_node, r) = self.node_mut().prepend_to_next(val);
-            if new_node != null_mut()
-                && self.common.node == self.common.list.tail
-            {
-                self.common.list.tail = new_node;
-            }
-            r
-        } else {
-            // Inserts into existing node, possibly splitting it
-            let (new_node, r) =
-                self.node_mut().insert(self.common.position + 1, val);
-            if new_node != null_mut()
-                && self.common.list.tail == self.common.node
-            {
-                self.common.list.tail = new_node;
-            }
-            r
+        if self.common.node == null_mut() {
+            return self.insert_only(n);
         }
+
+        let next = unsafe { *(self.common.node).next };
+        if next == null_mut() {
+            self.common.list.tail = n;
+        }
+        unsafe { *self.common.node }.set_next(n);
+        n.into()
     }
 
-    /// Remove current value, if any.
-    /// Returns the removed value and a reference to the removed value.
+    /// Insert node and set it as the head and tail, returning a [Ref] to it
+    fn insert_only(&mut self, n: NonNull<Node<T>>) -> Ref<T> {
+        self.common.node =
+            self.common.list.head = self.common.list.tail = n.into();
+        n.into()
+    }
+
+    /// Remove current node, if any.
+    /// Returns the removed value and a reference to the removed node.
+    /// Only returns [None], if the [LinkedList] is empty.
     ///
-    /// Sets the cursor to the previous [Node]. If none, sets it to the next
-    /// [Node].
+    /// Sets the cursor to the previous node. If none, sets it to the next
+    /// node.
     ///
     /// # Safety
     ///
-    /// Removing a value will invalidate any [Ref] pointing to it. It is the
-    /// caller's responsibility to remove any [Ref] to a removed value.
-    pub unsafe fn remove(&mut self) -> Option<(T, NullRef<T, N>)> {
-        if self.common.list.len() == 0 {
+    /// Removing a node will invalidate any [Ref] pointing to it. It is the
+    /// caller's responsibility to remove any [Ref] to a removed node.
+    pub unsafe fn remove(&mut self) -> Option<(T, NullRef<T>)> {
+        if self.common.node == null_mut() {
             return None;
         }
+
         self.common.list.length -= 1;
-
-        // Navigate to the previous or next sibling ahead of time.
-        // Save node pointer, in case node is to be removed.
-        let to_remove = (self.common.node, self.common.position);
-        if !self.previous() {
-            self.next();
+        if self.common.list.head == self.common.node {
+            self.common.list.head = unsafe { (*self.common.node).next };
+        }
+        if self.common.list.tail == self.common.node {
+            self.common.list.tail = unsafe { (*self.common.node).previous };
         }
 
-        let (val, reference, removed) = Node::remove(to_remove.0, to_remove.1);
-        if removed {
-            if self.common.list.head == to_remove.0 {
-                // Was head, so we moved to the next node
-                self.common.list.head = self.common.node;
+        let r = NullRef::from(self.common.node);
+        let cur = unsafe { Box::from_raw(self.common.node) };
+        if cur.previous != null_mut() {
+            unsafe { *cur.previous }.set_next(cur.next);
+            self.common.node = cur.previous;
+        } else {
+            if cur.next != null_mut() {
+                unsafe { *cur.next }.set_previous(null_mut());
             }
-            if self.common.list.tail == to_remove.0 {
-                // Was tail, so we moved to the previous node
-                self.common.list.tail = self.common.node;
-            }
+            self.common.node = cur.next;
         }
-        Some((val, reference))
+        Some(cur.value, r)
     }
 }
